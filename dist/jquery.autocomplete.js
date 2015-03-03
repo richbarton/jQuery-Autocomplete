@@ -1,14 +1,13 @@
 /**
-*  Ajax Autocomplete for jQuery, version 1.2.11
+*  Ajax Autocomplete for jQuery, version 1.2.16
 *  (c) 2014 Tomas Kirda
 *
 *  Ajax Autocomplete for jQuery is freely distributable under the terms of an MIT-style license.
 *  For details, see the web site: https://github.com/devbridge/jQuery-Autocomplete
-*
 */
 
-/*jslint  browser: true, white: true, plusplus: true */
-/*global define, window, document, jQuery, exports */
+/*jslint  browser: true, white: true, plusplus: true, vars: true */
+/*global define, window, document, jQuery, exports, require */
 
 // Expose plugin as an AMD module if AMD loader is present:
 (function (factory) {
@@ -75,6 +74,7 @@
                 onSearchStart: noop,
                 onSearchComplete: noop,
                 onSearchError: noop,
+                preserveInput: false,
                 containerClass: 'autocomplete-suggestions',
                 tabDisabled: false,
                 dataType: 'text',
@@ -197,6 +197,7 @@
             that.el.on('blur.autocomplete', function () { that.onBlur(); });
             that.el.on('focus.autocomplete', function () { that.onFocus(); });
             that.el.on('change.autocomplete', function (e) { that.onKeyUp(e); });
+            that.el.on('input.autocomplete', function (e) { that.onKeyUp(e); });
         },
 
         onFocus: function () {
@@ -248,6 +249,7 @@
         disable: function () {
             var that = this;
             that.disabled = true;
+            clearInterval(that.onChangeInterval);
             if (that.currentRequest) {
                 that.currentRequest.abort();
             }
@@ -265,8 +267,9 @@
                 containerParent = $container.parent().get(0);
             // Fix position automatically when appended to body.
             // In other cases force parameter must be given.
-            if (containerParent !== document.body && !that.options.forceFixPosition)
+            if (containerParent !== document.body && !that.options.forceFixPosition) {
                 return;
+            }
 
             // Choose orientation
             var orientation = that.options.orientation,
@@ -275,15 +278,13 @@
                 offset = that.el.offset(),
                 styles = { 'top': offset.top, 'left': offset.left };
 
-            if (orientation == 'auto') {
+            if (orientation === 'auto') {
                 var viewPortHeight = $(window).height(),
                     scrollTop = $(window).scrollTop(),
                     topOverflow = -scrollTop + offset.top - containerHeight,
                     bottomOverflow = scrollTop + viewPortHeight - (offset.top + height + containerHeight);
 
-                orientation = (Math.max(topOverflow, bottomOverflow) === topOverflow)
-                                ? 'top'
-                                : 'bottom';
+                orientation = (Math.max(topOverflow, bottomOverflow) === topOverflow) ? 'top' : 'bottom';
             }
 
             if (orientation === 'top') {
@@ -388,16 +389,21 @@
                         that.selectHint();
                         return;
                     }
-                    // Fall through to RETURN
+                    if (that.selectedIndex === -1) {
+                        that.hide();
+                        return;
+                    }
+                    that.select(that.selectedIndex);
+                    if (that.options.tabDisabled === false) {
+                        return;
+                    }
+                    break;
                 case keys.RETURN:
                     if (that.selectedIndex === -1) {
                         that.hide();
                         return;
                     }
                     that.select(that.selectedIndex);
-                    if (e.which === keys.TAB && that.options.tabDisabled === false) {
-                        return;
-                    }
                     break;
                 case keys.UP:
                     that.moveUp();
@@ -533,6 +539,19 @@
             options.params[options.paramName] = q;
             params = options.ignoreParams ? null : options.params;
 
+            if (options.onSearchStart.call(that.element, options.params) === false) {
+                return;
+            }
+
+            if ($.isFunction(options.lookup)){
+                options.lookup(q, function (data) {
+                    that.suggestions = data.suggestions;
+                    that.suggest();
+                    options.onSearchComplete.call(that.element, q, data.suggestions);
+                });
+                return;
+            }
+
             if (that.isLocal) {
                 response = that.getSuggestionsLocal(q);
             } else {
@@ -546,10 +565,8 @@
             if (response && $.isArray(response.suggestions)) {
                 that.suggestions = response.suggestions;
                 that.suggest();
+                options.onSearchComplete.call(that.element, q, response.suggestions);
             } else if (!that.isBadQuery(q)) {
-                if (options.onSearchStart.call(that.element, options.params) === false) {
-                    return;
-                }
                 if (that.currentRequest) {
                     that.currentRequest.abort();
                 }
@@ -572,6 +589,8 @@
                 }).fail(function (jqXHR, textStatus, errorThrown) {
                     options.onSearchError.call(that.element, q, jqXHR, textStatus, errorThrown);
                 });
+            } else {
+                options.onSearchComplete.call(that.element, q, []);
             }
         },
 
@@ -603,18 +622,24 @@
 
             that.visible = false;
             that.selectedIndex = -1;
+            clearInterval(that.onChangeInterval);
             $(that.suggestionsContainer).hide();
             that.signalHint(null);
         },
 
         suggest: function () {
             if (this.suggestions.length === 0) {
-                this.options.showNoSuggestionNotice ? this.noSuggestions() : this.hide();
+				if (this.options.showNoSuggestionNotice) {
+					this.noSuggestions();
+				} else {
+					this.hide();
+				}
                 return;
             }
 
             var that = this,
                 options = that.options,
+                groupBy = options.groupBy,
                 formatResult = options.formatResult,
                 value = that.getQuery(that.currentValue),
                 className = that.classes.suggestion,
@@ -623,6 +648,18 @@
                 noSuggestionsContainer = $(that.noSuggestionsContainer),
                 beforeRender = options.beforeRender,
                 html = '',
+                category,
+                formatGroup = function (suggestion, index) {
+                        var currentCategory = suggestion.data[groupBy];
+
+                        if (category === currentCategory){
+                            return '';
+                        }
+
+                        category = currentCategory;
+
+                        return '<div class="autocomplete-group"><strong>' + category + '</strong></div>';
+                    },
                 index;
 
             if (options.triggerSelectOnValidInput) {
@@ -635,6 +672,10 @@
 
             // Build suggestions inner HTML:
             $.each(that.suggestions, function (i, suggestion) {
+                if (groupBy){
+                    html += formatGroup(suggestion, value, i);
+                }
+
                 html += '<div class="' + className + '" data-index="' + i + '">' + formatResult(suggestion, value) + '</div>';
             });
 
@@ -643,21 +684,21 @@
             noSuggestionsContainer.detach();
             container.html(html);
 
-            // Select first value by default:
-            if (options.autoSelectFirst) {
-                that.selectedIndex = 0;
-                container.children().first().addClass(classSelected);
-            }
-
             if ($.isFunction(beforeRender)) {
                 beforeRender.call(that.element, container);
             }
 
             that.fixPosition();
-
             container.show();
-            that.visible = true;
 
+            // Select first value by default:
+            if (options.autoSelectFirst) {
+                that.selectedIndex = 0;
+                container.scrollTop(0);
+                container.children().first().addClass(classSelected);
+            }
+
+            that.visible = true;
             that.findBestHint();
         },
 
@@ -778,9 +819,9 @@
                 activeItem,
                 selected = that.classes.selected,
                 container = $(that.suggestionsContainer),
-                children = container.children();
+                children = container.find('.' + that.classes.suggestion);
 
-            container.children('.' + selected).removeClass(selected);
+            container.find('.' + selected).removeClass(selected);
 
             that.selectedIndex = index;
 
@@ -836,15 +877,16 @@
 
         adjustScroll: function (index) {
             var that = this,
-                activeItem = that.activate(index),
-                offsetTop,
-                upperBound,
-                lowerBound,
-                heightDelta = 25;
+                activeItem = that.activate(index);
 
             if (!activeItem) {
                 return;
             }
+
+            var offsetTop,
+                upperBound,
+                lowerBound,
+                heightDelta = $(activeItem).outerHeight();
 
             offsetTop = activeItem.offsetTop;
             upperBound = $(that.suggestionsContainer).scrollTop();
@@ -856,7 +898,9 @@
                 $(that.suggestionsContainer).scrollTop(offsetTop - that.options.maxHeight + heightDelta);
             }
 
-            that.el.val(that.getValue(that.suggestions[index].value));
+            if (!that.options.preserveInput) {
+                that.el.val(that.getValue(that.suggestions[index].value));
+            }
             that.signalHint(null);
         },
 
@@ -867,7 +911,7 @@
 
             that.currentValue = that.getValue(suggestion.value);
 
-            if (that.currentValue !== that.el.val()) {
+            if (that.currentValue !== that.el.val() && !that.options.preserveInput) {
                 that.el.val(that.currentValue);
             }
 
